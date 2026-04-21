@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-
 import re
+from typing import Any
 
 from mcp import ClientSession
 
-from logging_utils import debug_log, preview_text
+from core.logging_utils import debug_log, preview_text
 
 
 def flatten_tool_result(result: Any) -> str:
@@ -59,10 +58,6 @@ def extract_table_names(table_list_text: str) -> list[str]:
         if not line:
             continue
 
-        # Common output patterns:
-        # - public.customers
-        # - customers
-        # - {"schema":"public","name":"customers"}
         qualified = re.findall(r"\bpublic\.([A-Za-z_][A-Za-z0-9_]*)\b", line)
         named = re.findall(r"'name'\s*:\s*'([A-Za-z_][A-Za-z0-9_]*)'", line)
         named += re.findall(r'"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"', line)
@@ -80,27 +75,3 @@ def extract_table_names(table_list_text: str) -> list[str]:
                 candidates.append(plain[0])
 
     return candidates
-
-
-async def try_tool_variants(
-    session: ClientSession,
-    available_names: set[str],
-    variants: list[tuple[str, dict[str, Any]]],
-) -> str:
-    last_error: Exception | None = None
-
-    for tool_name, args in variants:
-        if tool_name not in available_names:
-            continue
-        try:
-            debug_log(f"Trying schema preload tool variant `{tool_name}`")
-            return await call_tool_text(session, tool_name, args)
-        except Exception as exc:
-            last_error = exc
-            debug_log(f"Tool variant `{tool_name}` failed: {exc}")
-            continue
-
-    if last_error is not None:
-        raise last_error
-    return ""
-

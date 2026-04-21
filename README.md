@@ -12,23 +12,29 @@ A PostgreSQL agent demo built with `postgres-mcp` and Gemini, with support for:
 
 ```text
 mcp-db-agent/
-|-- agent.py               # main orchestration entrypoint
-|-- gemini_adapter.py      # Gemini config, tool schema conversion, response parsing
-|-- mcp_tools.py           # MCP tool call helpers
-|-- schema_service.py      # schema introspection and cache refresh
-|-- schema_store.py        # read/write schema_cache.json
-|-- registry.py            # read/write db_registry.json
-|-- query_context.py       # build prompt context from cached schema
-|-- server_config.py       # MCP stdio server parameters
-|-- logging_utils.py       # debug logging helpers
-|-- prompt.py              # prompt loader
-|-- system_prompt.txt      # system prompt and guardrails
-|-- upload_importer.py     # import csv/xlsx/sql into PostgreSQL
-|-- streamlit_app.py       # demo frontend
+|-- agent.py               # CLI agent entrypoint
 |-- init_db.py             # SQL bootstrap helper
+|-- streamlit_app.py       # Streamlit entrypoint
+|-- docker-compose.yml     # local PostgreSQL service
+|-- system_prompt.txt      # system prompt and guardrails
 |-- db_registry.json       # registered database sources
 |-- schema_cache.json      # cached schema snapshots
-`-- docker-compose.yml     # local PostgreSQL service
+|-- core/
+|   |-- logging_utils.py   # debug logging helpers
+|   |-- prompt.py          # prompt loader
+|   |-- query_context.py   # build prompt context from cached schema
+|   `-- settings.py        # project paths and env-backed settings
+|-- adapters/
+|   |-- gemini_adapter.py  # Gemini config, retries, tool schema conversion
+|   |-- mcp_tools.py       # MCP tool call helpers
+|   |-- server_config.py   # MCP stdio server parameters
+|   `-- upload_importer.py # import csv/xlsx/sql into PostgreSQL
+|-- services/
+|   |-- registry.py        # read/write db_registry.json
+|   |-- schema_service.py  # schema introspection and cache refresh
+|   `-- schema_store.py    # read/write schema_cache.json
+`-- ui/
+    `-- streamlit_app.py   # actual Streamlit UI implementation
 ```
 
 ## Runtime Flow

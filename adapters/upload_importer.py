@@ -47,41 +47,21 @@ def database_uri_for_name(base_uri: str, db_name: str) -> str:
 def create_database(admin_uri: str, db_name: str) -> None:
     with psycopg.connect(admin_uri, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(db_name))
-            )
-            cur.execute(
-                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name))
-            )
+            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(db_name)))
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
 
 
-def create_table_from_dataframe(
-    conn: psycopg.Connection[Any],
-    table_name: str,
-    df: pd.DataFrame,
-) -> None:
+def create_table_from_dataframe(conn: psycopg.Connection[Any], table_name: str, df: pd.DataFrame) -> None:
     columns = []
     for column_name in df.columns:
         dtype = infer_postgres_type(df[column_name])
-        columns.append(
-            sql.SQL("{} {}").format(
-                sql.Identifier(str(column_name)),
-                sql.SQL(dtype),
-            )
-        )
+        columns.append(sql.SQL("{} {}").format(sql.Identifier(str(column_name)), sql.SQL(dtype)))
 
     with conn.cursor() as cur:
         cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(sql.Identifier(table_name)))
-        cur.execute(
-            sql.SQL("CREATE TABLE {} ({})").format(
-                sql.Identifier(table_name),
-                sql.SQL(", ").join(columns),
-            )
-        )
-
+        cur.execute(sql.SQL("CREATE TABLE {} ({})").format(sql.Identifier(table_name), sql.SQL(", ").join(columns)))
         if df.empty:
             return
-
         placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in df.columns)
         insert_stmt = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             sql.Identifier(table_name),
@@ -113,15 +93,13 @@ def import_xlsx(database_uri: str, _uploaded_name: str, content: bytes) -> None:
     workbook = pd.read_excel(BytesIO(content), sheet_name=None)
     with psycopg.connect(database_uri, autocommit=True) as conn:
         for sheet_name, df in workbook.items():
-            table_name = slugify(sheet_name)
-            create_table_from_dataframe(conn, table_name, df)
+            create_table_from_dataframe(conn, slugify(sheet_name), df)
 
 
 def import_sql(database_uri: str, content: bytes) -> None:
-    sql_text = content.decode("utf-8")
     with psycopg.connect(database_uri, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_text)
+            cur.execute(content.decode("utf-8"))
 
 
 def import_uploaded_file(database_uri: str, uploaded_name: str, content: bytes) -> None:

@@ -14,7 +14,10 @@ def schema_context_text(schema_snapshot: dict) -> str:
         )
 
     for table_name, table_schema in schema_snapshot.get("tables", {}).items():
-        notes.append(f"Schema for `{schema_snapshot.get('schema_name', 'public')}.{table_name}`:\n{table_schema}")
+        notes.append(
+            f"Schema for `{schema_snapshot.get('schema_name', 'public')}.{table_name}`:\n"
+            f"{table_schema}"
+        )
 
     return "\n\n".join(notes).strip()
 

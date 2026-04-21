@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from settings import REGISTRY_PATH, default_source_id
+from core.settings import REGISTRY_PATH, default_source_id
 
 
 def utc_now_iso() -> str:
@@ -38,15 +38,11 @@ def _load_payload() -> dict[str, Any]:
 
 
 def _save_payload(payload: dict[str, Any]) -> None:
-    REGISTRY_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    REGISTRY_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def list_sources() -> list[DatabaseSource]:
-    payload = _load_payload()
-    return [DatabaseSource.from_dict(item) for item in payload.get("sources", [])]
+    return [DatabaseSource.from_dict(item) for item in _load_payload().get("sources", [])]
 
 
 def get_source(source_id: str) -> DatabaseSource | None:
@@ -70,21 +66,17 @@ def upsert_source(source: DatabaseSource, make_default: bool = False) -> None:
     sources = payload.get("sources", [])
     updated_sources: list[dict[str, Any]] = []
     found = False
-
     if not source.created_at:
         source.created_at = utc_now_iso()
     source.updated_at = utc_now_iso()
-
     for item in sources:
         if item["source_id"] == source.source_id:
             updated_sources.append(source.to_dict())
             found = True
         else:
             updated_sources.append(item)
-
     if not found:
         updated_sources.append(source.to_dict())
-
     payload["sources"] = updated_sources
     if make_default or not payload.get("default_source_id"):
         payload["default_source_id"] = source.source_id

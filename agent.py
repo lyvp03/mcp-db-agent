@@ -9,7 +9,7 @@ from google.genai import types
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-from gemini_adapter import (
+from adapters.gemini_adapter import (
     extract_text,
     filter_tools_for_cached_schema,
     function_response_content,
@@ -19,13 +19,13 @@ from gemini_adapter import (
     response_function_calls,
     to_gemini_tools,
 )
-from logging_utils import debug_log, preview_text
-from mcp_tools import flatten_tool_result, normalize_args
-from query_context import schema_context_message
-from registry import get_default_source, get_source
-from schema_service import refresh_schema_cache
-from schema_store import get_schema_snapshot
-from server_config import build_server_params
+from adapters.mcp_tools import flatten_tool_result, normalize_args
+from adapters.server_config import build_server_params
+from core.logging_utils import debug_log, preview_text
+from core.query_context import schema_context_message
+from services.registry import get_default_source, get_source
+from services.schema_service import refresh_schema_cache
+from services.schema_store import get_schema_snapshot
 
 
 async def call_mcp_tools(

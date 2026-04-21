@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = BASE_DIR / "db_registry.json"
 SCHEMA_CACHE_PATH = BASE_DIR / "schema_cache.json"
 
