@@ -1,0 +1,7 @@
+mcp
+google-genai
+psycopg[binary]
+python-dotenv
+streamlit
+pandas
+openpyxl

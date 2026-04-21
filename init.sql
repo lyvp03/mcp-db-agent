@@ -1,0 +1,4 @@
+-- Placeholder only.
+-- Pagila import is handled by init_db.py using:
+--   pagila-schema.sql
+--   pagila-data.sql
