@@ -22,6 +22,7 @@ from adapters.gemini_adapter import (
 from adapters.mcp_tools import flatten_tool_result, normalize_args
 from adapters.server_config import build_server_params
 from core.logging_utils import debug_log, preview_text
+from core.prompt import build_system_prompt, describe_selected_guardrails
 from core.query_context import schema_context_message
 from services.registry import get_default_source, get_source
 from services.schema_service import refresh_schema_cache
@@ -103,7 +104,10 @@ async def run_agent(user_question: str, source_id: str | None = None) -> str:
                 has_schema_cache=schema_snapshot is not None,
             )
             gemini_tools = to_gemini_tools(filtered_tools)
-            config = generation_config(gemini_tools)
+            selected_guardrails = describe_selected_guardrails(user_question, schema_snapshot)
+            debug_log(f"Selected prompt sections: {selected_guardrails}")
+            system_prompt = build_system_prompt(user_question, schema_snapshot)
+            config = generation_config(gemini_tools, system_prompt)
 
             if schema_snapshot:
                 debug_log("Injecting schema context into conversation")

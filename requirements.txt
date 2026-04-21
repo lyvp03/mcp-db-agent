@@ -1,4 +1,5 @@
 mcp
+postgres-mcp
 google-genai
 psycopg[binary]
 python-dotenv

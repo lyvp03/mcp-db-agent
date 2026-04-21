@@ -9,7 +9,6 @@ from google import genai
 from google.genai import errors, types
 
 from core.logging_utils import debug_log
-from core.prompt import load_system_prompt
 
 SCHEMA_TOOL_NAMES = {
     "list_tables",
@@ -60,12 +59,15 @@ def filter_tools_for_cached_schema(tools: list[Any], has_schema_cache: bool) -> 
     return filtered
 
 
-def generation_config(mcp_tools: list[types.Tool]) -> types.GenerateContentConfig:
+def generation_config(
+    mcp_tools: list[types.Tool],
+    system_prompt: str,
+) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
         temperature=0,
         tools=mcp_tools,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        system_instruction=load_system_prompt(),
+        system_instruction=system_prompt,
     )
 
 
