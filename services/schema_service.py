@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from collections import defaultdict
 from typing import Any
 
@@ -13,6 +14,99 @@ from adapters.server_config import build_server_params_for_source
 from core.logging_utils import debug_log
 from services.registry import DatabaseSource
 from services.schema_store import save_schema_snapshot
+import re
+
+
+def compact_table_schema(schema_name: str, table_name: str, raw_schema_str: str) -> str:
+    try:
+        data = ast.literal_eval(raw_schema_str)
+        if isinstance(data, dict) and "columns" in data:
+            cols = data.get("columns", [])
+            col_strs = []
+            for c in cols:
+                col_name = c.get("column", c.get("name", ""))
+                data_type = c.get("data_type", c.get("type", ""))
+                if col_name:
+                    if data_type:
+                        col_strs.append(f"{col_name} {data_type}")
+                    else:
+                        col_strs.append(col_name)
+            return f"{table_name}({', '.join(col_strs)})"
+    except Exception:
+        pass
+    return raw_schema_str
+
+
+def infer_relationships(schema_name: str, grouped_columns: dict[str, list[dict[str, Any]]]) -> list[str]:
+    relationships = []
+    all_columns = defaultdict(list)
+    for table_name, cols in grouped_columns.items():
+        for col in cols:
+            all_columns[col["column"]].append((table_name, col["data_type"]))
+            
+    for col_name, locations in all_columns.items():
+        if len(locations) < 2:
+            continue
+        if not col_name.endswith(("_id", "_key", "_code")):
+            continue
+        for i, (t1, dt1) in enumerate(locations):
+            for t2, dt2 in locations[i+1:]:
+                if dt1 == dt2:
+                    relationships.append(f"{schema_name}.{t1}.{col_name} ↔ {schema_name}.{t2}.{col_name} (inferred)")
+                    
+    return relationships
+
+
+async def extract_all_relationships(session: ClientSession, schema_name: str, grouped_columns: dict[str, list[dict[str, Any]]]) -> list[str]:
+    relationships = []
+    
+    # 1. Query real Foreign Keys
+    fk_sql = f"""
+    SELECT
+        kcu.table_name      AS source_table,
+        kcu.column_name     AS source_column,
+        ccu.table_name      AS target_table,
+        ccu.column_name     AS target_column
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage ccu
+        ON tc.constraint_name = ccu.constraint_name
+        AND tc.table_schema = ccu.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_schema = '{schema_name}'
+    """
+    try:
+        fk_result = await call_tool_text(session, "execute_sql", {"sql": fk_sql})
+        fk_rows = ast.literal_eval(fk_result)
+        if isinstance(fk_rows, dict):
+            fk_rows = [fk_rows]
+        for r in fk_rows:
+            if isinstance(r, dict) and "source_table" in r:
+                relationships.append(f"{schema_name}.{r['source_table']}.{r['source_column']} → {schema_name}.{r['target_table']}.{r['target_column']} (FK)")
+    except Exception as exc:
+        debug_log(f"Failed to parse information_schema FK rows: {exc}")
+
+    # Track existing real FKs to avoid overlap
+    existing_pairs = set()
+    for rel in relationships:
+        # e.g., "public.customer.cust_id -> public.subscriber.cust_id"
+        parts = re.split(r' → | ↔ ', rel)
+        if len(parts) >= 2:
+            p1, p2 = parts[0].strip(), parts[1].split(' ')[0].strip()
+            existing_pairs.add(tuple(sorted([p1, p2])))
+
+    # 2. Heuristic inference
+    inferred_rels = infer_relationships(schema_name, grouped_columns)
+    for ir in inferred_rels:
+        parts = re.split(r' → | ↔ ', ir)
+        if len(parts) >= 2:
+            p1, p2 = parts[0].strip(), parts[1].split(' ')[0].strip()
+            if tuple(sorted([p1, p2])) not in existing_pairs:
+                relationships.append(ir)
+                
+    return relationships
 
 
 async def try_tool_variants(session: ClientSession, available_names: set[str], variants: list[tuple[str, dict[str, Any]]]) -> str:
@@ -82,11 +176,13 @@ async def introspect_via_information_schema(session: ClientSession, source: Data
             "constraints": [],
             "indexes": [],
         })
+    relationships = await extract_all_relationships(session, schema_name, grouped_columns)
+        
     debug_log(
         f"Built fallback schema snapshot for `{source.source_id}` with "
-        f"{len(tables)} tables"
+        f"{len(tables)} tables and {len(relationships)} relationships"
     )
-    return {"schema_name": schema_name, "table_list_text": "\n".join(table_names), "tables": tables}
+    return {"schema_name": schema_name, "table_list_text": "\n".join(table_names), "tables": tables, "relationships": relationships}
 
 
 async def introspect_source_schema(source: DatabaseSource) -> dict[str, Any]:
@@ -112,6 +208,7 @@ async def introspect_source_schema(source: DatabaseSource) -> dict[str, Any]:
                 debug_log(f"MCP schema tools returned no tables for `{source.source_id}`; falling back to information_schema queries")
                 return await introspect_via_information_schema(session, source)
             tables: dict[str, str] = {}
+            grouped_columns: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for table_name in discovered_tables:
                 describe_variants = [
                     ("describe_table", {"schema_name": source.schema_name, "table_name": table_name}),
@@ -124,15 +221,69 @@ async def introspect_source_schema(source: DatabaseSource) -> dict[str, Any]:
                 table_schema = await try_tool_variants(session, tool_names, describe_variants)
                 if table_schema:
                     tables[table_name] = table_schema
-            return {"schema_name": source.schema_name, "table_list_text": table_list_text, "tables": tables}
+                    try:
+                        data = ast.literal_eval(table_schema)
+                        if isinstance(data, dict) and "columns" in data:
+                            grouped_columns[table_name] = data["columns"]
+                    except Exception:
+                        pass
+            
+            relationships = await extract_all_relationships(session, source.schema_name, grouped_columns)
+            return {"schema_name": source.schema_name, "table_list_text": table_list_text, "tables": tables, "relationships": relationships}
 
 
 async def refresh_schema_cache(source: DatabaseSource) -> dict[str, Any]:
     debug_log(f"Refreshing schema cache for source `{source.source_id}`")
     snapshot = await introspect_source_schema(source)
+    tables = snapshot.get("tables", {})
     debug_log(
         f"Refresh completed for `{source.source_id}`; preparing to save "
-        f"{len(snapshot.get('tables', {}))} tables"
+        f"{len(tables)} tables"
     )
-    save_schema_snapshot(source.source_id, snapshot["schema_name"], snapshot["table_list_text"], snapshot["tables"])
+
+    # --- Semantic Indexing: Gen keywords + Embed + Store to Qdrant ---
+    keywords_data: dict[str, dict] = {}
+    try:
+        from google import genai
+        from services.keyword_generator import generate_all_keywords
+        from services.embedding_service import get_embed_client, embed_texts_async, build_embed_text
+        from services.vector_store import get_qdrant_client, upsert_table_vectors, delete_collection
+
+        # 1. Gen keywords for all tables (parallel via thread pool)
+        keyword_client = genai.Client(api_key=os.getenv("MIMO_API_KEY"))
+        from core.schema_graph import SchemaGraph
+        temp_graph = SchemaGraph.from_snapshot(snapshot)
+        compact_tables = {
+            t: temp_graph.to_prompt_text([t]) for t in tables.keys()
+        }
+        keywords_data = await generate_all_keywords(keyword_client, compact_tables)
+        debug_log(f"Generated keywords for {len(keywords_data)} tables")
+
+        # 2. Embed all tables in parallel
+        embed_client = get_embed_client()
+        ordered_names = list(keywords_data.keys())
+        embed_texts_list = [
+            build_embed_text(name, keywords_data[name]) for name in ordered_names
+        ]
+        vectors = await embed_texts_async(embed_client, embed_texts_list)
+        table_vectors: dict[str, list[float]] = dict(zip(ordered_names, vectors))
+        debug_log(f"Embedded {len(table_vectors)} tables into vectors (parallel)")
+
+        # 3. Store to Qdrant (delete old + upsert new)
+        qdrant = get_qdrant_client()
+        delete_collection(qdrant, source.source_id)
+        upsert_table_vectors(qdrant, source.source_id, table_vectors, keywords_data)
+        debug_log(f"Semantic index built: {len(table_vectors)} tables indexed to Qdrant")
+
+    except Exception as exc:
+        debug_log(f"Semantic indexing failed (non-fatal): {exc}")
+    # --- END Semantic Indexing ---
+
+    # Save schema cache (with keywords if available)
+    save_schema_snapshot(
+        source.source_id, snapshot["schema_name"],
+        snapshot["table_list_text"], tables,
+        snapshot.get("relationships", []),
+        keywords=keywords_data,
+    )
     return snapshot

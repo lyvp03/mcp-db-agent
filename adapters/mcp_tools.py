@@ -27,6 +27,85 @@ def flatten_tool_result(result: Any) -> str:
     return "\n\n".join(chunks) if chunks else "Tool returned no content."
 
 
+# ---------------------------------------------------------------------------
+# SQL result compacting — convert verbose JSON rows to compact table format
+# ---------------------------------------------------------------------------
+
+MAX_DISPLAY_ROWS = 50
+
+
+def _try_parse_rows(text: str) -> list[dict] | None:
+    """Try to parse text as a JSON array of objects (typical MCP SQL result)."""
+    text = text.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    if data and not isinstance(data[0], dict):
+        return None
+    return data
+
+
+def _format_value(val: Any) -> str:
+    """Format a single cell value for the compact table."""
+    if val is None:
+        return "NULL"
+    if isinstance(val, bool):
+        return str(val).lower()
+    if isinstance(val, float):
+        # Avoid unnecessary decimal places
+        if val == int(val):
+            return str(int(val))
+        return f"{val:g}"
+    return str(val)
+
+
+def compact_sql_result(raw_text: str) -> str:
+    """Convert a raw SQL result (JSON array) into schema-context-style format.
+
+    Matches the compact inline format used by schema context injection:
+        Result(plan_type, count):
+          POSTPAID, 5
+          PREPAID, 10
+        (2 rows)
+
+    Returns the original text unchanged if it's not a parseable JSON array.
+    """
+    rows = _try_parse_rows(raw_text)
+    if rows is None:
+        return raw_text
+
+    if not rows:
+        return "Query returned 0 rows."
+
+    # Extract column names from the first row
+    columns = list(rows[0].keys())
+
+    # Build header in schema-context style: Result(col1, col2, ...)
+    header = f"Result({', '.join(columns)}):"
+
+    # Build data rows (truncate if too many)
+    total_rows = len(rows)
+    display_rows = rows[:MAX_DISPLAY_ROWS]
+
+    lines = [header]
+    for row in display_rows:
+        vals = ", ".join(_format_value(row.get(col)) for col in columns)
+        lines.append(f"  {vals}")
+
+    # Row count summary
+    if total_rows <= MAX_DISPLAY_ROWS:
+        lines.append(f"({total_rows} rows)")
+    else:
+        lines.append(f"(showing {MAX_DISPLAY_ROWS} of {total_rows} rows)")
+
+    return "\n".join(lines)
+
+
 def normalize_args(raw_args: Any) -> dict[str, Any]:
     if raw_args is None:
         return {}

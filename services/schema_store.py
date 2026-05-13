@@ -15,7 +15,13 @@ def utc_now_iso() -> str:
 def _load_payload() -> dict[str, Any]:
     if not SCHEMA_CACHE_PATH.exists():
         return {"schemas": {}}
-    return json.loads(SCHEMA_CACHE_PATH.read_text(encoding="utf-8"))
+    content = SCHEMA_CACHE_PATH.read_text(encoding="utf-8").strip()
+    if not content:
+        return {"schemas": {}}
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"schemas": {}}
 
 
 def _save_payload(payload: dict[str, Any]) -> None:
@@ -27,7 +33,7 @@ def get_schema_snapshot(source_id: str) -> dict[str, Any] | None:
     return _load_payload().get("schemas", {}).get(source_id)
 
 
-def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str, tables: dict[str, str]) -> None:
+def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str, tables: dict[str, str], relationships: list[str] = None, keywords: dict[str, list[str]] = None) -> None:
     payload = _load_payload()
     schemas = payload.setdefault("schemas", {})
     debug_log(
@@ -40,6 +46,8 @@ def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str,
         "captured_at": utc_now_iso(),
         "table_list_text": table_list_text,
         "tables": tables,
+        "relationships": relationships or [],
+        "keywords": keywords or {},
     }
     _save_payload(payload)
     debug_log(f"Schema snapshot saved for `{source_id}`")

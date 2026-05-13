@@ -34,7 +34,13 @@ class DatabaseSource:
 def _load_payload() -> dict[str, Any]:
     if not REGISTRY_PATH.exists():
         return {"default_source_id": default_source_id(), "sources": []}
-    return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    content = REGISTRY_PATH.read_text(encoding="utf-8").strip()
+    if not content:
+        return {"default_source_id": default_source_id(), "sources": []}
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"default_source_id": default_source_id(), "sources": []}
 
 
 def _save_payload(payload: dict[str, Any]) -> None:

@@ -10,15 +10,16 @@ from google.genai import errors, types
 
 from core.logging_utils import debug_log
 
-SCHEMA_TOOL_NAMES = {
+ALLOWED_TOOL_NAMES = {
+    "execute_sql",
+    "read_query",
+    "write_query",
+    "query",
+    "list_schemas",
     "list_tables",
-    "get_tables",
-    "get_objects",
     "describe_table",
-    "get_table_schema",
-    "get_object_details",
+    "get_table_schema"
 }
-
 
 def sanitize_schema(value: Any) -> Any:
     if isinstance(value, dict):
@@ -34,7 +35,6 @@ def sanitize_schema(value: Any) -> Any:
         return [sanitize_schema(item) for item in value]
     return value
 
-
 def to_gemini_tools(tools: list[Any]) -> list[types.Tool]:
     declarations: list[types.FunctionDeclaration] = []
     for tool in tools:
@@ -47,14 +47,10 @@ def to_gemini_tools(tools: list[Any]) -> list[types.Tool]:
         )
     return [types.Tool(function_declarations=declarations)]
 
-
 def filter_tools_for_cached_schema(tools: list[Any], has_schema_cache: bool) -> list[Any]:
-    if not has_schema_cache:
-        return tools
-    filtered = [tool for tool in tools if tool.name not in SCHEMA_TOOL_NAMES]
+    filtered = [tool for tool in tools if tool.name in ALLOWED_TOOL_NAMES]
     debug_log(
-        f"Schema cache present; filtered tools from {len(tools)} to {len(filtered)} "
-        "by removing schema introspection tools"
+        f"Filtered tools to minimize overhead: kept {len(filtered)} out of {len(tools)} tools."
     )
     return filtered
 
@@ -120,9 +116,11 @@ def generate_with_fallback(
     client: genai.Client,
     conversation: list[types.Content],
     config: types.GenerateContentConfig,
+    model_override: str | None = None,
 ) -> Any:
     last_error: Exception | None = None
-    for model_name in model_candidates():
+    models = [model_override] if model_override else model_candidates()
+    for model_name in models:
         debug_log(f"Trying model `{model_name}`")
         for attempt in range(3):
             try:
@@ -130,11 +128,14 @@ def generate_with_fallback(
                     f"Calling Gemini generate_content with `{model_name}` "
                     f"(attempt {attempt + 1}/3, conversation items={len(conversation)})"
                 )
-                return client.models.generate_content(
+                response = client.models.generate_content(
                     model=model_name,
                     contents=conversation,
                     config=config,
                 )
+                setattr(response, "_model_name", model_name)
+                setattr(response, "_provider", "gemini")
+                return response
             except errors.ServerError as exc:
                 last_error = exc
                 debug_log(f"ServerError from `{model_name}`: {exc}")
@@ -202,8 +203,11 @@ def model_content_from_response(response: Any) -> types.Content:
     return types.Content(role="model", parts=parts)
 
 
-def function_response_content(name: str, payload: str) -> types.Content:
+def function_response_content(name: str, payload: str, id_str: str | None = None) -> types.Content:
+    fr = types.FunctionResponse(name=name, response={"result": payload})
+    if id_str:
+        fr.id = id_str
     return types.Content(
         role="user",
-        parts=[types.Part(function_response=types.FunctionResponse(name=name, response={"result": payload}))]
+        parts=[types.Part(function_response=fr)]
     )

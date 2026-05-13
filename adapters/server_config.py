@@ -12,12 +12,16 @@ def build_server_params() -> StdioServerParameters:
     return build_server_params_for_source(database_uri)
 
 
+import shutil
+
 def build_server_params_for_source(database_uri: str) -> StdioServerParameters:
     command = os.getenv("POSTGRES_MCP_COMMAND", "uvx")
     raw_args = os.getenv("POSTGRES_MCP_ARGS", "postgres-mcp --access-mode=restricted")
     args = raw_args.split()
 
+    resolved_command = shutil.which(command) or command
+
     env = os.environ.copy()
     env["DATABASE_URI"] = database_uri
 
-    return StdioServerParameters(command=command, args=args, env=env)
+    return StdioServerParameters(command=resolved_command, args=args, env=env)

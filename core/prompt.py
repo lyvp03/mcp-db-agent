@@ -24,111 +24,16 @@ def load_prompt_sections() -> dict[str, str]:
     return sections
 
 
-def _question_lower(question: str) -> str:
-    return question.casefold()
-
-
-def _has_any(text: str, keywords: list[str]) -> bool:
-    return any(keyword in text for keyword in keywords)
-
-
-def _schema_text(schema_snapshot: dict[str, Any] | None) -> str:
-    if not schema_snapshot:
-        return ""
-    tables = schema_snapshot.get("tables", {})
-    table_list_text = schema_snapshot.get("table_list_text", "")
-    parts = [table_list_text] if isinstance(table_list_text, str) else []
-    if isinstance(tables, dict):
-        parts.extend(str(name) for name in tables.keys())
-        parts.extend(str(value) for value in tables.values())
-    return "\n".join(parts).casefold()
-
-
 def selected_guardrail_sections(
     question: str,
     schema_snapshot: dict[str, Any] | None = None,
 ) -> list[str]:
-    q = _question_lower(question)
-    schema = _schema_text(schema_snapshot)
-    selected = ["base", "uploaded_db", "numeric"]
-
-    if _has_any(
-        q,
-        [
-            "cong no",
-            "công nợ",
-            "outstanding",
-            "debt",
-            "overdue",
-            "receivable",
-            "billing",
-            "invoice",
-            "payment",
-        ],
-    ):
-        selected.append("billing")
-
-    if _has_any(
-        q,
-        [
-            "data usage",
-            "amt_data",
-            "usage",
-            "subscriber",
-            "thuê bao",
-            "thue bao",
-            "isdn",
-            "msisdn",
-            "plan",
-            "goi cuoc",
-            "gói cước",
-        ],
-    ) or _has_any(schema, ["subscriptions", "usage_records", "msisdn", "isdn", "amt_data"]):
-        selected.append("telco")
-
-    if _has_any(
-        q,
-        [
-            "nghệ an",
-            "nghe an",
-            "hà nội",
-            "ha noi",
-            "đà nẵng",
-            "da nang",
-            "city",
-            "province",
-            "tỉnh",
-            "thành phố",
-            "địa chỉ",
-            "dia chi",
-            "address",
-        ],
-    ):
-        selected.append("location")
-
-    if _has_any(
-        q,
-        [
-            "top",
-            "cao nhat",
-            "lớn nhất",
-            "lon nhat",
-            "nhiều nhất",
-            "nhieu nhat",
-            "vừa",
-            "vua",
-            "highest",
-            "largest",
-            "most",
-        ],
-    ):
-        selected.append("ranking")
-
-    deduped: list[str] = []
-    for name in selected:
-        if name not in deduped:
-            deduped.append(name)
-    return deduped
+    """Return all available guardrail sections.
+    Since the system prompt is now highly compact, we inject all rules by default
+    instead of using fragile keyword matching.
+    """
+    sections = load_prompt_sections()
+    return list(sections.keys())
 
 
 def build_system_prompt(
