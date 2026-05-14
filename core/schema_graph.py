@@ -13,7 +13,7 @@ class RelationshipEdge:
     source_column: str
     target_table: str
     target_column: str
-    kind: str = "inferred"  # "FK" or "inferred"
+    kind: str = "FK"  # "FK" (inferred edges removed)
 
     def __str__(self) -> str:
         arrow = "→" if self.kind == "FK" else "↔"
@@ -32,6 +32,7 @@ class SchemaGraph:
     tables: dict[str, str] = field(default_factory=dict)  # table_name -> compact schema text
     edges: list[RelationshipEdge] = field(default_factory=list)
     _adj: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
+    _fk_parents: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
 
     # ------------------------------------------------------------------
     # Construction
@@ -43,6 +44,7 @@ class SchemaGraph:
         rels_raw = snapshot.get("relationships", [])
         edges: list[RelationshipEdge] = []
         adj: dict[str, set[str]] = defaultdict(set)
+        fk_parents: dict[str, set[str]] = defaultdict(set)
 
         for rel_str in rels_raw:
             edge = _parse_relationship(rel_str)
@@ -51,9 +53,15 @@ class SchemaGraph:
             edges.append(edge)
             adj[edge.source_table].add(edge.target_table)
             adj[edge.target_table].add(edge.source_table)
+            if edge.kind.lower() == "fk":
+                fk_parents[edge.source_table].add(edge.target_table)
 
-        graph = cls(tables=dict(tables), edges=edges, _adj=adj)
+        graph = cls(tables=dict(tables), edges=edges, _adj=adj, _fk_parents=fk_parents)
         return graph
+
+    def get_fk_parents(self, table: str) -> set[str]:
+        """Return direct master/dimension parents of a table."""
+        return self._fk_parents.get(table, set())
 
     # ------------------------------------------------------------------
     # Traversal
@@ -177,6 +185,57 @@ class SchemaGraph:
 
         return all_path_tables, paths
 
+    def compute_result_connectivity(self, top_tables: list[str]) -> dict:
+        """Analyze how search-result tables connect in the FK graph.
+
+        DB-agnostic complexity detection — uses only graph structure.
+
+        Returns:
+            dict with keys:
+              clusters     – number of FK-disconnected components
+              max_distance – longest shortest-path among top-3 candidates
+              complexity   – "simple" | "moderate" | "complex"
+        """
+        valid = [t for t in top_tables if t in self._adj]
+        if len(valid) <= 1:
+            return {"clusters": 1, "max_distance": 0, "complexity": "simple"}
+
+        # Count disconnected components (1-hop adjacency among candidates)
+        visited: set[str] = set()
+        clusters = 0
+        valid_set = set(valid)
+        for t in valid:
+            if t in visited:
+                continue
+            clusters += 1
+            queue = [t]
+            while queue:
+                node = queue.pop(0)
+                if node in visited:
+                    continue
+                visited.add(node)
+                for neighbor in self._adj.get(node, set()):
+                    if neighbor in valid_set and neighbor not in visited:
+                        queue.append(neighbor)
+
+        # Max BFS distance between top-3 pairs
+        max_dist = 0
+        check = valid[:3]
+        for i, t1 in enumerate(check):
+            for t2 in check[i + 1:]:
+                path = self.shortest_path(t1, t2)
+                if path:
+                    max_dist = max(max_dist, len(path) - 1)
+
+        if clusters >= 3 or max_dist >= 4:
+            complexity = "complex"
+        elif clusters >= 2 or max_dist >= 2:
+            complexity = "moderate"
+        else:
+            complexity = "simple"
+
+        return {"clusters": clusters, "max_distance": max_dist, "complexity": complexity}
+
     # ------------------------------------------------------------------
     # Prompt Generation
     # ------------------------------------------------------------------
@@ -194,8 +253,6 @@ class SchemaGraph:
         edge_map: dict[tuple[str, str], str] = {}
         for e in relevant_edges:
             edge_map[(e.source_table, e.source_column)] = e.target_table
-            if e.kind == "inferred":
-                edge_map[(e.target_table, e.target_column)] = e.source_table
 
         parts: list[str] = []
         for t in selected_tables:
@@ -220,7 +277,6 @@ class SchemaGraph:
                         data_type = c.get("data_type", c.get("type", ""))
                         if not col_name:
                             continue
-                            
                         target = edge_map.get((t, col_name))
                         if target:
                             if data_type:
@@ -263,12 +319,10 @@ class SchemaGraph:
             else:
                 parts.append(schema_text)
 
+        # Show FK edges
         if relevant_edges:
             rels = "\n".join(f"- {e}" for e in relevant_edges)
-            parts.append(
-                f"\nRelationships:\n{rels}\n"
-                "Use JOIN when querying across these related tables."
-            )
+            parts.append(f"\nFK:\n{rels}")
 
         return "\n".join(parts)
 

@@ -21,7 +21,7 @@ from adapters.mcp_tools import flatten_tool_result, normalize_args, compact_sql_
 from adapters.server_config import build_server_params
 from core.logging_utils import debug_log, preview_text
 from core.prompt import build_system_prompt, describe_selected_guardrails
-from core.query_context import schema_context_message
+from core.query_context import schema_context_message, schema_context_text
 from core.token_tracker import AgentResult, TurnUsage, estimate_tool_tokens
 from core.settings import default_model
 from services.registry import get_default_source, get_source
@@ -135,7 +135,21 @@ async def run_agent(user_question: str, source_id: str | None = None, model_name
             debug_log(f"Selected prompt sections: {selected_guardrails}")
             system_prompt = build_system_prompt(user_question, schema_snapshot)
             config = generation_config(gemini_tools, system_prompt)
-            agent_result.system_prompt_tokens = max(1, len(system_prompt) // 4)
+            if client and not model_name.startswith("mimo"):
+                try:
+                    exact_sys = client.models.count_tokens(model=model_name, contents=system_prompt)
+                    agent_result.system_prompt_tokens = exact_sys.total_tokens
+                except Exception:
+                    agent_result.system_prompt_tokens = max(1, len(system_prompt) // 4)
+            elif model_name.startswith("mimo"):
+                try:
+                    import tiktoken
+                    enc = tiktoken.get_encoding("cl100k_base")
+                    agent_result.system_prompt_tokens = len(enc.encode(system_prompt))
+                except ImportError:
+                    agent_result.system_prompt_tokens = max(1, len(system_prompt) // 4)
+            else:
+                agent_result.system_prompt_tokens = max(1, len(system_prompt) // 4)
 
             if schema_snapshot:
                 debug_log("Injecting schema context into conversation")
@@ -147,7 +161,32 @@ async def run_agent(user_question: str, source_id: str | None = None, model_name
                 agent_result.join_paths = search_meta.get("join_paths", [])
                 # Estimate schema context tokens from the injected text
                 schema_text = context_msg.parts[0].text if context_msg.parts else ""
-                agent_result.schema_context_tokens = max(1, len(schema_text) // 4)
+                full_text = schema_context_text(schema_snapshot)
+                
+                if client and not model_name.startswith("mimo"):
+                    try:
+                        # Fetch exact token count using Gemini API
+                        exact_full = client.models.count_tokens(model=model_name, contents=full_text)
+                        exact_inj = client.models.count_tokens(model=model_name, contents=schema_text)
+                        agent_result.full_schema_context_tokens = exact_full.total_tokens
+                        agent_result.schema_context_tokens = exact_inj.total_tokens
+                    except Exception as exc:
+                        debug_log(f"Token count API failed: {exc}")
+                        agent_result.full_schema_context_tokens = max(1, len(full_text) // 4)
+                        agent_result.schema_context_tokens = max(1, len(schema_text) // 4)
+                elif model_name.startswith("mimo"):
+                    try:
+                        import tiktoken
+                        enc = tiktoken.get_encoding("cl100k_base")
+                        agent_result.full_schema_context_tokens = len(enc.encode(full_text))
+                        agent_result.schema_context_tokens = len(enc.encode(schema_text))
+                    except ImportError:
+                        agent_result.full_schema_context_tokens = max(1, len(full_text) // 4)
+                        agent_result.schema_context_tokens = max(1, len(schema_text) // 4)
+                else:
+                    agent_result.full_schema_context_tokens = max(1, len(full_text) // 4)
+                    agent_result.schema_context_tokens = max(1, len(schema_text) // 4)
+                    
                 agent_result.schema_context_text = schema_text
 
             turn_count = 0

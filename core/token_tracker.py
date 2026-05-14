@@ -35,6 +35,7 @@ class AgentResult:
     join_paths: list[list[str]] = field(default_factory=list)
     # Input token breakdown estimates
     schema_context_tokens: int = 0
+    full_schema_context_tokens: int = 0
     system_prompt_tokens: int = 0
     schema_context_text: str = ""
 

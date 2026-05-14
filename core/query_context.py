@@ -41,7 +41,7 @@ def selective_schema_context_text(
     question: str,
     schema_snapshot: dict[str, Any],
     source_id: str | None = None,
-    max_tables: int = 5,
+    max_tables: int = 10,
 ) -> tuple[str, dict]:
     """Build schema context text injecting ONLY relevant tables.
 
@@ -75,24 +75,43 @@ def selective_schema_context_text(
     metadata["selected_tables"] = selected
 
     all_tables = list(schema_snapshot.get("tables", {}).keys())
+    other_tables = [t for t in all_tables if t not in selected]
 
-    schema_name = schema_snapshot.get("schema_name", "public")
     notes: list[str] = []
 
-    # Always show the full table list so AI knows what exists
-    notes.append(
-        f"All tables in schema `{schema_name}`: {', '.join(all_tables)}"
-    )
-
-    # Show detailed schema only for selected tables
-    notes.append(
-        f"Detailed schema for {len(selected)} relevant table(s):"
-    )
+    # Show selected tables' full schema
     prompt_text = graph.to_prompt_text(selected)
     if prompt_text:
         notes.append(prompt_text)
 
+    # List remaining tables (compact, no schema) so AI knows what else exists
+    if other_tables:
+        notes.append(f"Other tables: {', '.join(other_tables)}")
+
     return "\n\n".join(notes).strip(), metadata
+
+
+# ── Tokenizer singleton cache ────────────────────────────────────────
+_tokenizer_cache: dict[str, "SparseTokenizer"] = {}
+
+
+def _get_or_load_tokenizer(source_id: str):
+    """Load sparse tokenizer from schema_cache (cached per source_id)."""
+    if source_id in _tokenizer_cache:
+        return _tokenizer_cache[source_id]
+    try:
+        from services.schema_store import get_schema_snapshot
+        from services.sparse_tokenizer import SparseTokenizer
+        snap = get_schema_snapshot(source_id)
+        vocab = snap.get("sparse_vocabulary", {}) if snap else {}
+        if not vocab:
+            return None
+        tok = SparseTokenizer()
+        tok.vocab = {k: int(v) for k, v in vocab.items()}
+        _tokenizer_cache[source_id] = tok
+        return tok
+    except Exception:
+        return None
 
 
 def _semantic_select(
@@ -101,23 +120,38 @@ def _semantic_select(
     graph: SchemaGraph,
     max_tables: int,
 ) -> dict | None:
-    """Try semantic search. Returns dict with tables + metadata, or None if unavailable."""
+    """Try hybrid search (dense+sparse RRF). Falls back to dense-only if no vocabulary.
+
+    Returns dict with tables + metadata, or None if unavailable.
+    """
     if not source_id:
         return None
     try:
         from services.embedding_service import get_embed_client, embed_text
-        from services.vector_store import get_qdrant_client, search_tables
-        from core.confidence_router import route_intent
+        from services.vector_store import get_qdrant_client, search_tables, hybrid_search
+        from core.confidence_router import route_intent, apply_role_preference
 
         embed_client = get_embed_client()
         query_vector = embed_text(embed_client, question)
-
         qdrant = get_qdrant_client()
-        results = search_tables(qdrant, source_id, query_vector, top_k=max_tables)
+
+        # Try hybrid (dense+sparse RRF) first, fall back to dense-only
+        tokenizer = _get_or_load_tokenizer(source_id)
+        if tokenizer:
+            sparse_idx, sparse_val = tokenizer.to_sparse(question)
+            results = hybrid_search(
+                qdrant, source_id, query_vector,
+                sparse_idx, sparse_val, top_k=10,
+            )
+        else:
+            results = search_tables(qdrant, source_id, query_vector, top_k=10)
 
         if not results:
             debug_log("Semantic search returned no results")
             return None
+
+        # Apply table role preference (boost master/fact over lookup/satellite)
+        results = apply_role_preference(results)
 
         # Build search_scores for UI display
         search_scores = [
@@ -125,46 +159,146 @@ def _semantic_select(
             for r in results
         ]
 
+        # All tables from search results (ranked by score)
+        all_search_tables = [
+            r.get("payload", {}).get("table_name")
+            for r in results if r.get("payload")
+        ]
+        search_set = set(all_search_tables)
+
         decision = route_intent(results)
         strategy = decision["strategy"]
         candidates = decision["candidates"]
 
+        # ── Adaptive routing: override using graph connectivity ──
+        top_search = all_search_tables[:5]
+        conn = graph.compute_result_connectivity(top_search)
+        debug_log(
+            f"Connectivity check: clusters={conn['clusters']}, "
+            f"max_dist={conn['max_distance']}, complexity={conn['complexity']}"
+        )
+
+        # Override direct → graph if results span disconnected FK clusters
+        if strategy == "direct" and conn["clusters"] >= 2:
+            debug_log(
+                f"Override: DIRECT -> GRAPH (results span {conn['clusters']} "
+                f"disconnected FK clusters)"
+            )
+            strategy = "graph"
+            decision["strategy"] = "graph"
+            decision["candidates"] = all_search_tables[:5]
+            candidates = decision["candidates"]
+
+        # Adaptive max_tables based on structural complexity
+        if conn["complexity"] == "complex":
+            max_tables = 10
+        elif conn["complexity"] == "moderate":
+            max_tables = 7
+        else:
+            max_tables = 5
+            
+        # Tinh thần: Nếu đã là Graph Route (cần đi tìm path), phải nới tối đa
+        # để chứa đủ bridge tables, tránh việc LLM bị thiếu bảng và phải recall tool.
+        if strategy == "graph":
+            max_tables = max(max_tables, 10)
+
+        debug_log(f"Adaptive max_tables={max_tables} (complexity={conn['complexity']}, strategy={strategy})")
+
         if strategy == "direct":
-            # High confidence: inject primary table + BFS neighbors
+            # Primary table is dominant — inject it + 1-hop FK neighbors from search
             primary = decision["primary_table"]
-            if primary and primary in [t for t in graph.tables]:
+            if primary and primary in graph.tables:
                 selected = [primary]
-                # Expand with graph neighbors for JOIN context
-                neighbors = graph.neighbors([primary], hops=1)
-                for n in neighbors:
-                    if n not in selected and len(selected) < max_tables:
-                        selected.append(n)
+                direct_neighbors = graph._adj.get(primary, set())
+
+                # Add search results that are direct FK neighbors (1-hop only)
+                for t in all_search_tables:
+                    if t not in selected and t in direct_neighbors and len(selected) < max_tables:
+                        selected.append(t)
+
+                # Inject master tables for the primary and any pulled neighbors
+                selected = _inject_master_tables(selected, graph, max_tables)
+
+                # If still room, add 1 lookup table that is direct FK neighbor
+                _fill_one_lookup(selected, graph, max_tables)
+
                 return {"tables": selected, "route_type": "direct", "search_scores": search_scores}
             return {"tables": candidates[:max_tables], "route_type": "direct", "search_scores": search_scores}
 
         elif strategy == "graph":
-            # Medium confidence: use graph BFS to find bridge tables
+            # Multiple close candidates — BFS Steiner tree between top-3
             valid_candidates = [c for c in candidates if c in graph.tables]
             if len(valid_candidates) >= 2:
-                path_tables, join_paths = graph.find_join_path(valid_candidates)
+                path_tables, join_paths = graph.find_join_path(valid_candidates[:3])
+                selected = list(path_tables)[:max_tables]
+
+                # Add search results that are direct FK neighbors of the BFS path
+                path_neighbors = set()
+                for t in selected:
+                    path_neighbors.update(graph._adj.get(t, set()))
+                for t in all_search_tables:
+                    if t not in selected and t in path_neighbors and len(selected) < max_tables:
+                        selected.append(t)
+
+                selected = _inject_master_tables(selected, graph, max_tables)
+                _fill_one_lookup(selected, graph, max_tables)
                 return {
-                    "tables": list(path_tables)[:max_tables],
+                    "tables": selected,
                     "route_type": "graph",
                     "search_scores": search_scores,
                     "join_paths": join_paths,
                 }
             elif valid_candidates:
-                expanded = graph.neighbors(valid_candidates, hops=1)
-                return {"tables": list(expanded)[:max_tables], "route_type": "graph", "search_scores": search_scores, "join_paths": []}
+                # Single candidate — expand 1-hop, filter to search-relevant
+                all_neighbors = graph.neighbors(valid_candidates, hops=1)
+                selected = valid_candidates[:]
+                for n in all_neighbors:
+                    if n in search_set and n not in selected and len(selected) < max_tables:
+                        selected.append(n)
+                selected = _inject_master_tables(selected, graph, max_tables)
+                _fill_one_lookup(selected, graph, max_tables)
+                return {"tables": selected, "route_type": "graph", "search_scores": search_scores, "join_paths": []}
             return {"tables": candidates[:max_tables], "route_type": "graph", "search_scores": search_scores, "join_paths": []}
 
         else:
-            # Fallback: return top-K candidates as-is
             return {"tables": candidates[:max_tables], "route_type": "fallback", "search_scores": search_scores}
 
     except Exception as exc:
         debug_log(f"Semantic search failed, falling back to keyword: {exc}")
-        return None  # Fallback to keyword matching
+        return None
+
+
+_LOOKUP_NAMES = {"status_codes", "countries", "currencies", "languages", "identity_types"}
+
+
+def _fill_one_lookup(selected: list[str], graph: SchemaGraph, max_tables: int) -> None:
+    """Add at most 1 lookup table that is a direct FK neighbor of any selected table."""
+    if len(selected) >= max_tables:
+        return
+    selected_set = set(selected)
+    for table in selected:
+        for neighbor in graph._adj.get(table, set()):
+            if neighbor not in selected_set and neighbor in _LOOKUP_NAMES:
+                selected.append(neighbor)
+                return  # only 1
+
+
+def _inject_master_tables(selected: list[str], graph: SchemaGraph, max_tables: int) -> list[str]:
+    """Auto-inject master parents of the currently selected tables to provide full context."""
+    if len(selected) >= max_tables:
+        return selected
+    
+    new_selected = list(selected)
+    selected_set = set(selected)
+    
+    for table in selected:
+        parents = graph.get_fk_parents(table)
+        for parent in parents:
+            if parent not in selected_set and len(new_selected) < max_tables:
+                new_selected.append(parent)
+                selected_set.add(parent)
+                
+    return new_selected
 
 
 def schema_context_message(

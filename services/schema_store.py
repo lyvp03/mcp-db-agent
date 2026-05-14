@@ -33,7 +33,7 @@ def get_schema_snapshot(source_id: str) -> dict[str, Any] | None:
     return _load_payload().get("schemas", {}).get(source_id)
 
 
-def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str, tables: dict[str, str], relationships: list[str] = None, keywords: dict[str, list[str]] = None) -> None:
+def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str, tables: dict[str, str], relationships: list[str] = None, keywords: dict[str, list[str]] = None, sparse_vocabulary: dict[str, int] = None) -> None:
     payload = _load_payload()
     schemas = payload.setdefault("schemas", {})
     debug_log(
@@ -48,6 +48,7 @@ def save_schema_snapshot(source_id: str, schema_name: str, table_list_text: str,
         "tables": tables,
         "relationships": relationships or [],
         "keywords": keywords or {},
+        "sparse_vocabulary": sparse_vocabulary or {},
     }
     _save_payload(payload)
     debug_log(f"Schema snapshot saved for `{source_id}`")

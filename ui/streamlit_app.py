@@ -133,12 +133,20 @@ def render_assistant_result(result: AgentResult | str):
             cols[3].metric("📊 Total", f"{result.total_tokens:,}")
 
             schema_context_tokens = getattr(result, "schema_context_tokens", 0)
+            full_schema_context_tokens = getattr(result, "full_schema_context_tokens", 0)
             system_prompt_tokens = getattr(result, "system_prompt_tokens", 0)
+            
             if schema_context_tokens > 0 or system_prompt_tokens > 0:
-                st.markdown("**Input Breakdown (Estimated):**")
-                cols_est = st.columns(2)
-                cols_est[0].metric("System Prompt", f"~{system_prompt_tokens:,}")
-                cols_est[1].metric("Schema Context", f"~{schema_context_tokens:,}")
+                st.markdown("**Input Breakdown:**")
+                cols_est = st.columns(3 if full_schema_context_tokens > 0 else 2)
+                cols_est[0].metric("System Prompt", f"{system_prompt_tokens:,}")
+                cols_est[1].metric("Schema Context", f"{schema_context_tokens:,}")
+                
+                if full_schema_context_tokens > 0:
+                    saved = full_schema_context_tokens - schema_context_tokens
+                    pct_saved = (saved / full_schema_context_tokens) * 100 if full_schema_context_tokens > 0 else 0
+                    cols_est[2].metric("Context Saved", f"{saved:,}", f"{pct_saved:.1f}%")
+                    st.caption(f"If we injected all tables (full schema), it would exactly cost **{full_schema_context_tokens:,}** tokens per turn.")
             
             for t in result.turns:
                 st.markdown(f"**Turn {t.turn_number}:** prompt={t.prompt_tokens:,} | output={t.candidates_tokens:,} | think={t.thoughts_tokens:,}")
@@ -159,7 +167,7 @@ def render_assistant_result(result: AgentResult | str):
                     st.markdown(t.thinking_text)
 
     if result.route_type:
-        route_icons = {"direct": "🎯", "graph": "🔗", "fallback": "🔄", "keyword": "🔑"}
+        route_icons = {"direct": "🎯", "graph": "🔗", "hybrid": "⚡", "fallback": "🔄", "keyword": "🔑"}
         route_icon = route_icons.get(result.route_type, "❓")
         with st.expander(f"{route_icon} Schema Routing: {result.route_type.upper()}"):
             st.markdown(f"**Strategy:** `{result.route_type}`")
@@ -182,11 +190,13 @@ def render_assistant_result(result: AgentResult | str):
             if result.search_scores:
                 st.markdown("---")
                 st.markdown("**Semantic Search Scores (Top-K):**")
+                max_score = max(s for _, s in result.search_scores) if result.search_scores else 1.0
+                max_score = max(max_score, 0.001)  # avoid division by zero
                 for table_name, score in result.search_scores:
-                    bar_pct = min(score * 100, 100)
-                    confidence = "🟢" if score >= 0.65 else "🟡" if score >= 0.4 else "🔴"
+                    ratio = score / max_score
+                    confidence = "🟢" if ratio >= 0.85 else "🟡" if ratio >= 0.5 else "🔴"
                     st.markdown(f"{confidence} `{table_name}`: **{score:.4f}**")
-                    st.progress(bar_pct / 100)
+                    st.progress(min(ratio, 1.0))
 
     schema_context_text = getattr(result, "schema_context_text", "")
     if schema_context_text:

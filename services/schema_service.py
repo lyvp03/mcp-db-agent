@@ -37,30 +37,20 @@ def compact_table_schema(schema_name: str, table_name: str, raw_schema_str: str)
     return raw_schema_str
 
 
-def infer_relationships(schema_name: str, grouped_columns: dict[str, list[dict[str, Any]]]) -> list[str]:
-    relationships = []
-    all_columns = defaultdict(list)
-    for table_name, cols in grouped_columns.items():
-        for col in cols:
-            all_columns[col["column"]].append((table_name, col["data_type"]))
-            
-    for col_name, locations in all_columns.items():
-        if len(locations) < 2:
-            continue
-        if not col_name.endswith(("_id", "_key", "_code")):
-            continue
-        for i, (t1, dt1) in enumerate(locations):
-            for t2, dt2 in locations[i+1:]:
-                if dt1 == dt2:
-                    relationships.append(f"{schema_name}.{t1}.{col_name} ↔ {schema_name}.{t2}.{col_name} (inferred)")
-                    
-    return relationships
+
 
 
 async def extract_all_relationships(session: ClientSession, schema_name: str, grouped_columns: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """Extract real Foreign Key relationships from the database.
+
+    Only queries information_schema for actual FK constraints.
+    Inferred (heuristic) edges are intentionally NOT generated because:
+    - They are 70% noise (status_id/currency_id cross-links)
+    - All tables remain connected via FK edges alone
+    - They bloat the graph and cause BFS to find wrong paths
+    """
     relationships = []
-    
-    # 1. Query real Foreign Keys
+
     fk_sql = f"""
     SELECT
         kcu.table_name      AS source_table,
@@ -88,24 +78,6 @@ async def extract_all_relationships(session: ClientSession, schema_name: str, gr
     except Exception as exc:
         debug_log(f"Failed to parse information_schema FK rows: {exc}")
 
-    # Track existing real FKs to avoid overlap
-    existing_pairs = set()
-    for rel in relationships:
-        # e.g., "public.customer.cust_id -> public.subscriber.cust_id"
-        parts = re.split(r' → | ↔ ', rel)
-        if len(parts) >= 2:
-            p1, p2 = parts[0].strip(), parts[1].split(' ')[0].strip()
-            existing_pairs.add(tuple(sorted([p1, p2])))
-
-    # 2. Heuristic inference
-    inferred_rels = infer_relationships(schema_name, grouped_columns)
-    for ir in inferred_rels:
-        parts = re.split(r' → | ↔ ', ir)
-        if len(parts) >= 2:
-            p1, p2 = parts[0].strip(), parts[1].split(' ')[0].strip()
-            if tuple(sorted([p1, p2])) not in existing_pairs:
-                relationships.append(ir)
-                
     return relationships
 
 
@@ -241,13 +213,17 @@ async def refresh_schema_cache(source: DatabaseSource) -> dict[str, Any]:
         f"{len(tables)} tables"
     )
 
-    # --- Semantic Indexing: Gen keywords + Embed + Store to Qdrant ---
+    # --- Semantic Indexing: Gen keywords + Embed (dense+sparse) + Store to Qdrant ---
     keywords_data: dict[str, dict] = {}
+    sparse_vocabulary: dict[str, int] = {}
     try:
         from google import genai
         from services.keyword_generator import generate_all_keywords
-        from services.embedding_service import get_embed_client, embed_texts_async, build_embed_text
+        from services.embedding_service import (
+            get_embed_client, embed_texts_async, build_dense_text, build_sparse_text,
+        )
         from services.vector_store import get_qdrant_client, upsert_table_vectors, delete_collection
+        from services.sparse_tokenizer import SparseTokenizer
 
         # 1. Gen keywords for all tables (parallel via thread pool)
         keyword_client = genai.Client(api_key=os.getenv("MIMO_API_KEY"))
@@ -256,34 +232,43 @@ async def refresh_schema_cache(source: DatabaseSource) -> dict[str, Any]:
         compact_tables = {
             t: temp_graph.to_prompt_text([t]) for t in tables.keys()
         }
-        keywords_data = await generate_all_keywords(keyword_client, compact_tables)
+        keywords_data = await generate_all_keywords(keyword_client, compact_tables, graph=temp_graph)
         debug_log(f"Generated keywords for {len(keywords_data)} tables")
 
-        # 2. Embed all tables in parallel
+        # 2. Build dense vectors
         embed_client = get_embed_client()
         ordered_names = list(keywords_data.keys())
-        embed_texts_list = [
-            build_embed_text(name, keywords_data[name]) for name in ordered_names
-        ]
-        vectors = await embed_texts_async(embed_client, embed_texts_list)
-        table_vectors: dict[str, list[float]] = dict(zip(ordered_names, vectors))
-        debug_log(f"Embedded {len(table_vectors)} tables into vectors (parallel)")
+        dense_texts = {n: build_dense_text(n, keywords_data[n]) for n in ordered_names}
+        vectors = await embed_texts_async(embed_client, list(dense_texts.values()))
+        dense_vectors: dict[str, list[float]] = dict(zip(ordered_names, vectors))
+        debug_log(f"Embedded {len(dense_vectors)} tables into dense vectors")
 
-        # 3. Store to Qdrant (delete old + upsert new)
+        # 3. Build sparse vectors
+        tokenizer = SparseTokenizer()
+        sparse_texts = {n: build_sparse_text(n, keywords_data[n]) for n in ordered_names}
+        tokenizer.fit(list(sparse_texts.values()))
+        sparse_vectors = {n: tokenizer.to_sparse(t) for n, t in sparse_texts.items()}
+        sparse_vocabulary = tokenizer.vocab
+        debug_log(f"Built sparse vectors for {len(sparse_vectors)} tables (vocab={len(sparse_vocabulary)} terms)")
+
+        # 4. Store to Qdrant (delete old + upsert new with named vectors)
         qdrant = get_qdrant_client()
         delete_collection(qdrant, source.source_id)
-        upsert_table_vectors(qdrant, source.source_id, table_vectors, keywords_data)
-        debug_log(f"Semantic index built: {len(table_vectors)} tables indexed to Qdrant")
+        upsert_table_vectors(qdrant, source.source_id, dense_vectors, sparse_vectors, keywords_data)
+        debug_log(f"Hybrid index built: {len(dense_vectors)} tables indexed to Qdrant (dense+sparse)")
 
     except Exception as exc:
         debug_log(f"Semantic indexing failed (non-fatal): {exc}")
+        import traceback
+        debug_log(traceback.format_exc())
     # --- END Semantic Indexing ---
 
-    # Save schema cache (with keywords if available)
+    # Save schema cache (with keywords + sparse vocabulary)
     save_schema_snapshot(
         source.source_id, snapshot["schema_name"],
         snapshot["table_list_text"], tables,
         snapshot.get("relationships", []),
         keywords=keywords_data,
+        sparse_vocabulary=sparse_vocabulary,
     )
     return snapshot

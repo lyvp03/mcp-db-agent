@@ -31,7 +31,7 @@ def flatten_tool_result(result: Any) -> str:
 # SQL result compacting — convert verbose JSON rows to compact table format
 # ---------------------------------------------------------------------------
 
-MAX_DISPLAY_ROWS = 50
+MAX_DISPLAY_ROWS = 20
 
 
 def _try_parse_rows(text: str) -> list[dict] | None:

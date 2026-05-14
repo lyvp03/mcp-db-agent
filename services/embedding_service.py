@@ -43,24 +43,47 @@ async def embed_texts_async(client: genai.Client, texts: list[str]) -> list[list
 
 
 def build_embed_text(table_name: str, keyword_data: dict) -> str:
-    """Build the text to embed for a table by flattening categorized keywords."""
+    """Build the text to embed for a table by flattening categorized keywords.
+
+    Legacy function — kept for backward compatibility.
+    New code should use build_dense_text() or build_sparse_text().
+    """
+    return build_dense_text(table_name, keyword_data)
+
+
+def build_dense_text(table_name: str, kw_data: dict) -> str:
+    """Concise text for dense embedding (semantic matching).
+
+    Dense embeddings work best with focused, concise text that
+    captures the semantic essence of the table.
+    """
     parts = []
+    if "primary_domain" in kw_data:
+        parts.append(str(kw_data["primary_domain"]))
+    kws = kw_data.get("keywords", {})
+    flat = [str(v) for cat in kws.values() if isinstance(cat, list) for v in cat]
+    if flat:
+        parts.append(", ".join(flat))
+    # Add 2-3 most relevant hypothetical questions
+    questions = kw_data.get("hypothetical_questions", [])[:3]
+    if questions:
+        parts.append(" | ".join(questions))
+    return f"{table_name}: {' — '.join(parts)}"
+
+
+def build_sparse_text(table_name: str, kw_data: dict) -> str:
+    """Focused text for BM25 sparse matching (Technical/Exact keywords only).
     
-    # Add primary domain if it exists
-    if "primary_domain" in keyword_data:
-        parts.append(str(keyword_data["primary_domain"]))
-        
-    # Flatten the categories
-    kws = keyword_data.get("keywords", {})
-    flat_list = []
-    if isinstance(kws, dict):
-        for cat, values in kws.items():
-            if isinstance(values, list):
-                flat_list.extend([str(v) for v in values])
-    elif isinstance(kws, list):
-        flat_list.extend([str(v) for v in kws])
-        
-    if flat_list:
-        parts.append(", ".join(flat_list))
-        
-    return f"{table_name}: {' - '.join(parts)}"
+    BM25 acts as a safety net for exact table names and English abbreviations.
+    Semantic Vietnamese questions and common domains are left to Dense Embeddings.
+    """
+    parts = [table_name.replace("_", " ")]
+    
+    # Only include aliases (which typically contain technical abbreviations like CDR, KYC)
+    kws = kw_data.get("keywords", {})
+    if isinstance(kws, dict) and "aliases" in kws:
+        aliases = kws["aliases"]
+        if isinstance(aliases, list):
+            parts.extend([str(v) for v in aliases])
+            
+    return " ".join(parts)
