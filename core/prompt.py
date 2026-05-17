@@ -43,7 +43,15 @@ def build_system_prompt(
     sections = load_prompt_sections()
     ordered_names = selected_guardrail_sections(question, schema_snapshot)
     parts = [sections[name] for name in ordered_names if name in sections]
-    return "\n\n".join(part for part in parts if part.strip())
+    prompt = "\n\n".join(part for part in parts if part.strip())
+
+    # Inject current date so LLM knows the correct year/month
+    # (LLM training cutoff may think it's an earlier year)
+    from datetime import date
+    today = date.today().isoformat()
+    prompt += f"\n\n[context]\nCurrent date: {today}. Use this when reasoning about past/future dates."
+
+    return prompt
 
 
 def describe_selected_guardrails(
